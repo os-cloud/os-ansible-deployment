@@ -23,6 +23,14 @@
         dest_group: "neutron_l3_agent, neutron_metadata_agent"
       when:
         - "{{ neutron_plugin_type == 'ml2.ovs.dvr' }}"
+    - include: common-tasks/dynamic-grouping.yml
+      vars:
+        src_group: "nova_compute"
+        dest_group: "neutron-network_hosts"
+        limit: "-3:"
+      when:
+        - not groups['neutron-network_hosts'] | length > 0
+
 
 - name: Installation and setup of Neutron
   hosts: neutron_all

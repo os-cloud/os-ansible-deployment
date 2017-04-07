@@ -420,6 +420,35 @@
 #
 # --------
 #
+# --------
+#
+# Level: neutron-network_hosts (optional)
+# List of target hosts on which to deploy neutron agent services. Recommend three
+# minimum target hosts for this service. Typically contains specialized hosts used for
+# consolidating L3 network traffic. These services will be deployed on baremetal
+# (without containers).
+#
+#   Level: <value> (required, string)
+#   Hostname of a target host.
+#
+#     Option: ip (required, string)
+#     IP address of this target host, typically the IP address assigned to
+#     the management bridge.
+#
+# Example:
+#
+# Define three OpenStack neutron network hosts:
+#
+# neutron-network_hosts:
+#   network1:
+#     ip: 172.29.236.201
+#   network2:
+#     ip: 172.29.236.202
+#   network3:
+#     ip: 172.29.236.203
+#
+# --------
+#
 # Level: compute_hosts (optional)
 # List of target hosts on which to deploy the nova compute service. Recommend
 # one minimum target host for this service. Typically contains target hosts

@@ -17,7 +17,7 @@
   add_host:
     group: "{{ dest_group }}"
     name: "{{ item }}"
-  with_items: "{{ groups[src_group] }}"
+  with_items: "{{ groups[src_group][limit | default(':')] }}"
   when:
     - "{{ groups[src_group] is defined }}"
   tags:

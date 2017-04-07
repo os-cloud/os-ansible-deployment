@@ -14,9 +14,6 @@
 # limitations under the License.
 
 component_skel:
-  neutron_agent:
-    belongs_to:
-      - neutron_all
   neutron_dhcp_agent:
     belongs_to:
       - neutron_all
@@ -52,23 +49,27 @@ component_skel:
 container_skel:
   neutron_agents_container:
     belongs_to:
-      - network_containers
-    contains:
+      - neutron-network_containers
+      - neutron_agents
       - neutron_agent
-      - neutron_metadata_agent
-      - neutron_metering_agent
+    contains:
+      - neutron_bgp_dragent
+      - neutron_l3_agent
       - neutron_linuxbridge_agent
       - neutron_openvswitch_agent
-      - neutron_l3_agent
-      - neutron_dhcp_agent
-      - neutron_lbaas_agent
-      - neutron_bgp_dragent
+      - neutron_sriov_nic_agent
     properties:
+      is_metal: true
       service_name: neutron
+
   neutron_server_container:
     belongs_to:
       - network_containers
     contains:
+      - neutron_dhcp_agent
+      - neutron_lbaas_agent
+      - neutron_metadata_agent
+      - neutron_metering_agent
       - neutron_server
     properties:
       service_name: neutron
@@ -79,5 +80,11 @@ physical_skel:
     belongs_to:
       - all_containers
   network_hosts:
+    belongs_to:
+      - hosts
+  neutron-network_containers:
+    belongs_to:
+      - all_containers
+  neutron-network_hosts:
     belongs_to:
       - hosts
