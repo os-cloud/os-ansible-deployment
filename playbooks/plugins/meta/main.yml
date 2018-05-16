@@ -13,14 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-- name: Adding new system tuning
-  sysctl:
-    name: "{{ item.key }}"
-    value: "{{ item.value }}"
-    sysctl_set: "{{ item.set|default('yes') }}"
-    state: "{{ item.state|default('present') }}"
-    reload: "{{ item.reload|default('yes') }}"
-  with_items: "{{ openstack_kernel_options | default([]) }}"
-  ignore_errors: true
-  tags:
-    - openstack-host-kernel-tuning
+galaxy_info:
+  author: rcbops
+  description: Plugin collection
+  company: Rackspace
+  license: Apache2
+  min_ansible_version: 1.6.6
+  platforms:
+    - name: Ubuntu
+      versions:
+        - trusty
+  categories:
+    - cloud
+    - rabbitmq
+    - development
+    - openstack
+dependencies: []

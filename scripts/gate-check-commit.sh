@@ -92,18 +92,9 @@ mkdir -p /openstack/log
 ln -sf /openstack/log $(dirname ${0})/../logs
 
 pushd $(dirname ${0})/../playbooks
-  # Disable Ansible color output
-  sed -i 's/nocolor.*/nocolor = 1/' ansible.cfg
-
   # Create ansible logging directory and add in a log file entry into ansible.cfg
   mkdir -p /openstack/log/ansible-logging
   sed -i '/\[defaults\]/a log_path = /openstack/log/ansible-logging/ansible.log' ansible.cfg
-
-  # This plugin makes the output easier to read
-  wget -O plugins/callbacks/human_log.py https://gist.githubusercontent.com/cliffano/9868180/raw/f360f306b3c6d689734a6aa8773a00edf16a0054/human_log.py
-
-  # Enable callback plugins
-  sed -i '/\[defaults\]/a callback_plugins = plugins/callbacks' ansible.cfg
 popd
 
 # Log some data about the instance and the rest of the system

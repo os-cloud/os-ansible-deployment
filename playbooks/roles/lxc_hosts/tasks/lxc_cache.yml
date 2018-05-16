@@ -25,7 +25,7 @@
   retries: 3
   delay: 10
   until: cache_download|success
-  with_items: lxc_container_caches
+  with_items: "{{lxc_container_caches}}"
   tags:
     - lxc-cache
     - lxc-cache-download
@@ -45,7 +45,7 @@
 
 - name: Move lxc cached image into place
   command: "tar xf /var/cache/lxc_{{ item.name }} -C {{ lxc_container_cache_path }}/"
-  with_items: lxc_container_caches
+  with_items: "{{lxc_container_caches}}"
   when: cache_download|changed
   tags:
     - lxc-cache

@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 # Copyright 2014, Rackspace US, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,15 +19,27 @@ import os
 import re
 import traceback
 
-from ansible import errors
-from ansible import utils
+from distutils.version import LooseVersion
+from ansible import __version__ as __ansible_version__
 import yaml
 
+BASECLASS = object
+if LooseVersion(__ansible_version__) < LooseVersion("2.0"):
+    from ansible import utils, errors
+    LOOKUP_MODULE_CLASS = 'V1'
+else:
+    from ansible.errors import AnsibleError
+    from ansible.plugins.lookup import LookupBase
+    BASECLASS = LookupBase
+    LOOKUP_MODULE_CLASS = 'V2'
 
 # Used to keep track of git package parts as various files are processed
 GIT_PACKAGE_DEFAULT_PARTS = dict()
 
 
+# Role based package indexes
+ROLE_DISTRO_BREAKOUT_PACKAGES = dict()
+ROLE_BREAKOUT_REQUIREMENTS = dict()
 ROLE_PACKAGES = dict()
 ROLE_REQUIREMENTS = dict()
 
@@ -48,6 +61,128 @@ BUILT_IN_PIP_PACKAGE_VARS = [
     'pip_container_packages',
     'pip_packages'
 ]
+
+BUILT_IN_DISTRO_PACKAGE_VARS = [
+    'distro_packages',
+    'apt_packages',
+    'yum_packages'
+]
+
+
+PACKAGE_MAPPING = {
+    'packages': set(),
+    'remote_packages': set(),
+    'remote_package_parts': list(),
+    'role_packages': dict(),
+    'role_project_groups': dict(),
+    'distro_packages': set()
+}
+
+
+def map_base_and_remote_packages(package, package_map):
+    """Determine whether a package is a base package or a remote package
+       and add to the appropriate set.
+
+    :type package: ``str``
+    :type package_map: ``dict``
+    """
+    if package.startswith(('http:', 'https:', 'git+')):
+        if '@' not in package:
+            package_map['packages'].add(package)
+        else:
+            git_parts = git_pip_link_parse(package)
+            package_name = git_parts[-2]
+            if not package_name:
+                package_name = git_pip_link_parse(package)[0]
+
+            for rpkg in list(package_map['remote_packages']):
+                rpkg_name = git_pip_link_parse(rpkg)[-2]
+                if not rpkg_name:
+                    rpkg_name = git_pip_link_parse(package)[0]
+
+                if rpkg_name == package_name:
+                    package_map['remote_packages'].remove(rpkg)
+                    package_map['remote_packages'].add(package)
+                    break
+            else:
+                package_map['remote_packages'].add(package)
+    else:
+        package_map['packages'].add(package)
+
+
+def parse_remote_package_parts(package_map):
+    """Parse parts of each remote package and add them to
+       the remote_package_parts list.
+
+    :type package_map: ``dict``
+    """
+    keys = [
+        'name',
+        'version',
+        'fragment',
+        'url',
+        'original',
+        'egg_name',
+        'project_group'
+    ]
+    remote_pkg_parts = [
+        dict(
+            zip(
+                keys, git_pip_link_parse(i)
+            )
+        ) for i in package_map['remote_packages']
+    ]
+    package_map['remote_package_parts'].extend(remote_pkg_parts)
+    package_map['remote_package_parts'] = list(
+        dict(
+            (i['name'], i)
+            for i in package_map['remote_package_parts']
+        ).values()
+    )
+
+
+def map_role_packages(package_map):
+    """Add and sort packages belonging to a role to the role_packages dict.
+
+    :type package_map: ``dict``
+    """
+    for k, v in ROLE_PACKAGES.items():
+        role_pkgs = package_map['role_packages'][k] = list()
+        package_map['role_project_groups'][k] = v.pop('project_group', 'all')
+        for pkg_list in v.values():
+            role_pkgs.extend(pkg_list)
+        else:
+            package_map['role_packages'][k] = sorted(set(role_pkgs))
+
+
+def map_base_package_details(package_map):
+    """Parse package version and marker requirements and add to the
+       base packages set.
+
+    :type package_map: ``dict``
+    """
+    check_pkgs = dict()
+    base_packages = sorted(list(package_map['packages']))
+    for pkg in base_packages:
+        name, versions, markers = _pip_requirement_split(pkg)
+        if versions and markers:
+            versions = '%s;%s' % (versions, markers)
+        elif not versions and markers:
+            versions = ';%s' % markers
+
+        if name in check_pkgs:
+            if versions and not check_pkgs[name]:
+                check_pkgs[name] = versions
+        else:
+            check_pkgs[name] = versions
+    else:
+        return_pkgs = list()
+        for k, v in check_pkgs.items():
+            if v:
+                return_pkgs.append('%s%s' % (k, v))
+            else:
+                return_pkgs.append(k)
+        package_map['packages'] = set(return_pkgs)
 
 
 def git_pip_link_parse(repo):
@@ -121,7 +256,11 @@ def git_pip_link_parse(repo):
         if 'gitname=' in _branch[-1]:
             name = _meta_return(_branch[-1], 'gitname')
 
-    return name.lower(), branch, plugin_path, url, repo, egg_name
+        project_group = 'all'
+        if 'projectgroup=' in _branch[-1]:
+            project_group = _meta_return(_branch[-1], 'projectgroup')
+
+    return name.lower(), branch, plugin_path, url, repo, egg_name, project_group
 
 
 def _pip_requirement_split(requirement):
@@ -166,6 +305,7 @@ class DependencyFileProcessor(object):
     def _py_pkg_extend(self, packages, py_package=None):
         if py_package is None:
             py_package = self.pip['py_package']
+
         for pkg in packages:
             pkg_name = _pip_requirement_split(pkg)[0]
             for py_pkg in py_package:
@@ -173,7 +313,8 @@ class DependencyFileProcessor(object):
                 if pkg_name == py_pkg_name:
                     py_package.remove(py_pkg)
         else:
-            py_package.extend([i.lower() for i in packages])
+            norm_pkgs = [i.lower() for i in packages if not i.startswith('{{')]
+            py_package.extend(norm_pkgs)
         return py_package
 
     @staticmethod
@@ -271,15 +412,18 @@ class DependencyFileProcessor(object):
         branch_var = prefix + 'git_install_branch'
         fragment_var = prefix + 'git_install_fragments'
         plugins_var = prefix + 'repo_plugins'
+        group_var = prefix + 'git_project_group'
 
         # get the repo definition
         git_data['repo'] = loaded_yaml.get(repo_var)
+        group = git_data['project_group'] = loaded_yaml.get(group_var, 'all')
 
         # get the repo name definition
         name = git_data['name'] = loaded_yaml.get(name_var)
         if not name:
+            # NOTE: strip off trailing /, .git, or .git/
             name = git_data['name'] = os.path.basename(
-                git_data['repo'].rstrip('/')
+                re.sub(r'(\/$|\.git(\/)?$)', '', git_data['repo'])
             )
         git_data['egg_name'] = name.replace('-', '_')
 
@@ -304,6 +448,7 @@ class DependencyFileProcessor(object):
 
         package += '#egg=%s' % git_data['egg_name']
         package += '&gitname=%s' % name
+        package += '&projectgroup=%s' % group
         if git_data['fragments']:
             package += '&%s' % git_data['fragments']
 
@@ -325,30 +470,51 @@ class DependencyFileProcessor(object):
                 git_data=git_data
             )
 
-    def _package_build_index(self, packages, role_name, var_name,
-                             pkg_index=ROLE_PACKAGES):
-        self._py_pkg_extend(packages)
+    def _package_build_index(self, packages, role_name, var_name, pkg_index,
+                             project_group='all', var_file_name=None,
+                             pip_packages=True):
+        if pip_packages:
+            self._py_pkg_extend(packages)
+
         if role_name:
             if role_name in pkg_index:
                 role_pkgs = pkg_index[role_name]
             else:
                 role_pkgs = pkg_index[role_name] = dict()
 
-            pkgs = role_pkgs.get(var_name, list())
-            if 'optional' not in var_name:
+            role_pkgs['project_group'] = project_group
+
+            if var_file_name:
+                _name = os.path.splitext(os.path.basename(var_file_name))[0]
+                file_name_index = pkg_index[role_name][_name] = dict()
+                pkgs = file_name_index.get(var_name, list())
                 pkgs = self._py_pkg_extend(packages, pkgs)
-            pkg_index[role_name][var_name] = pkgs
+                file_name_index[var_name] = sorted(set(pkgs))
+            else:
+                pkgs = role_pkgs.get(var_name, list())
+                pkgs.extend(packages)
+                if 'pip' in var_name:
+                    pkgs = [i.lower() for i in pkgs if not i.startswith('{{')]
+                else:
+                    pkgs = [i for i in pkgs if not i.startswith('{{')]
+                if pkgs:
+                    pkg_index[role_name][var_name] = sorted(set(pkgs))
         else:
             for k, v in pkg_index.items():
                 for item_name in v.keys():
                     if var_name == item_name:
-                        pkg_index[k][item_name] = self._py_pkg_extend(packages, pkg_index[k][item_name])
-
+                        pkg_index[k][item_name] = self._py_pkg_extend(
+                            packages,
+                            pkg_index[k][item_name]
+                        )
 
     def _process_files(self):
-        """Process files."""
+        """Process all of the requirement files."""
+        self._process_files_defaults()
+        self._process_files_requirements()
 
-        role_name = None
+    def _process_files_defaults(self):
+        """Process files."""
         for file_name in self._filter_files(self.file_names, ('yaml', 'yml')):
             with open(file_name, 'r') as f:
                 # If there is an exception loading the file continue
@@ -362,42 +528,109 @@ class DependencyFileProcessor(object):
                     if not loaded_config or not isinstance(loaded_config, dict):
                         continue
 
-                    if 'roles' in file_name:
-                        _role_name = file_name.split('roles%s' % os.sep)[-1]
-                        role_name = _role_name.split(os.sep)[0]
+                if 'roles' in file_name:
+                    _role_name = file_name.split('roles%s' % os.sep)[-1]
+                    role_name = _role_name.split(os.sep)[0]
+                else:
+                    role_name = None
+
+            for key, value in loaded_config.items():
+                if key.endswith('role_project_group'):
+                    project_group = value
+                    break
+            else:
+                project_group = 'all'
 
             for key, values in loaded_config.items():
+                key = key.lower()
                 if key.endswith('git_repo'):
                     self._process_git(
                         loaded_yaml=loaded_config,
                         git_item=key,
                         yaml_file_name=file_name
                     )
+                # Process pip packages
+                self._process_packages(
+                    pkg_constant=BUILT_IN_PIP_PACKAGE_VARS,
+                    pkg_breakout_index=ROLE_BREAKOUT_REQUIREMENTS,
+                    pkg_role_index=ROLE_PACKAGES,
+                    pkg_var_name=key,
+                    packages=values,
+                    role_name=role_name,
+                    project_group=project_group
+                )
+                # Process distro packages
+                self._process_packages(
+                    pkg_constant=BUILT_IN_DISTRO_PACKAGE_VARS,
+                    pkg_breakout_index=ROLE_DISTRO_BREAKOUT_PACKAGES,
+                    pkg_role_index=dict(),  # this is not used here
+                    pkg_var_name=key,
+                    packages=values,
+                    role_name=role_name,
+                    project_group=project_group,
+                    role_index=False,
+                    var_file_name=file_name,
+                    pip_packages=False
+                )
 
-                if [i for i in BUILT_IN_PIP_PACKAGE_VARS
-                    if i in key
-                        if 'proprietary' not in key]:
-                        self._package_build_index(
-                            packages=values,
-                            role_name=role_name,
-                            var_name=key
-                        )
+    def _process_packages(self, pkg_constant, pkg_breakout_index,
+                          pkg_role_index, pkg_var_name, packages, role_name,
+                          project_group, role_index=True, var_file_name=None,
+                          pip_packages=True):
+        """Process variables to build the package data structures.
 
-            for key, values in loaded_config.items():
-                if 'proprietary' in key:
-                    proprietary_pkgs = [
-                        i for i in values
-                        if GIT_PACKAGE_DEFAULT_PARTS.get(i)
-                    ]
-                    if proprietary_pkgs:
-                        self._package_build_index(
-                            packages=proprietary_pkgs,
-                            role_name=role_name,
-                            var_name=key
-                        )
-        else:
-            role_name = None
+        :param pkg_constant: CONSTANT used to validate package names
+        :type pkg_constant: ``list``
+        :param pkg_breakout_index: CONSTANT used to store indexed packages
+        :type pkg_breakout_index: ``dict``
+        :param pkg_role_index: CONSTANT used to store role indexed packages
+        :type pkg_role_index: ``dict``
+        :param pkg_var_name: package variable name
+        :type pkg_var_name: ``str``
+        :param packages: list of packages to index
+        :type packages: ``list``
+        :param role_name: Name of the role where the packages came from
+        :type role_name: ``str``
+        :param project_group: Name of the group being indexed
+        :type project_group: ``str``
+        :param role_index: Enable or disable the use of the role index
+        :type role_index: ``bool``
+        :param var_file_name: Variable file name used to index packages
+        :type var_file_name: ``str``
+        :param pip_packages: Enable or disable pip index types
+        :type pip_packages: ``bool``
+        """
+        if [i for i in pkg_constant if i in pkg_var_name]:
+            if 'proprietary' in pkg_var_name:
+                return
 
+            self._package_build_index(
+                packages=packages,
+                role_name=role_name,
+                var_name=pkg_var_name,
+                pkg_index=pkg_breakout_index,
+                project_group=project_group,
+                var_file_name=var_file_name,
+                pip_packages=pip_packages
+            )
+
+            if not role_index:
+                return
+            elif 'optional' in pkg_var_name:
+                return
+            else:
+                self._package_build_index(
+                    packages=packages,
+                    role_name=role_name,
+                    var_name=pkg_var_name,
+                    pkg_index=pkg_role_index,
+                    project_group=project_group,
+                    var_file_name=var_file_name,
+                    pip_packages=pip_packages
+                )
+
+    def _process_files_requirements(self):
+        """Process requirements files."""
         return_list = self._filter_files(self.file_names, 'txt')
         for file_name in return_list:
             base_name = os.path.basename(file_name)
@@ -409,10 +642,12 @@ class DependencyFileProcessor(object):
             for file_name in return_list:
                 if file_name.endswith('other-requirements.txt'):
                     continue
-                if 'roles' in file_name:
+                elif file_name.endswith('bindep.txt'):
+                    continue
+                elif 'roles' in file_name:
                     _role_name = file_name.split('roles%s' % os.sep)[-1]
                     role_name = _role_name.split(os.sep)[0]
-                if not role_name:
+                else:
                     role_name = 'default'
                 with open(file_name, 'r') as f:
                     packages = [
@@ -428,13 +663,15 @@ class DependencyFileProcessor(object):
                             packages=packages,
                             role_name='global_pins',
                             var_name='pinned_packages',
-                            pkg_index=ROLE_REQUIREMENTS
+                            pkg_index=ROLE_REQUIREMENTS,
+                            project_group='all'
                         )
                     self._package_build_index(
                         packages=packages,
                         role_name=role_name,
                         var_name='txt_file_packages',
-                        pkg_index=ROLE_REQUIREMENTS
+                        pkg_index=ROLE_REQUIREMENTS,
+                        project_group='all'
                     )
 
 
@@ -446,17 +683,68 @@ def _abs_path(path):
     )
 
 
-class LookupModule(object):
-
+class LookupModule(BASECLASS):
     def __init__(self, basedir=None, **kwargs):
         """Run the lookup module.
 
         :type basedir:
         :type kwargs:
         """
-        self.basedir = basedir
+        self.ansible_v1_basedir = basedir
 
-    def run(self, terms, inject=None, **kwargs):
+    def run(self, *args, **kwargs):
+        if LOOKUP_MODULE_CLASS == 'V1':
+            return self.run_v1(*args, **kwargs)
+        else:
+            return self.run_v2(*args, **kwargs)
+
+    def run_v2(self, terms, variables=None, **kwargs):
+        """Run the main application.
+
+        :type terms: ``str``
+        :type variables: ``str``
+        :type kwargs: ``dict``
+        :returns: ``list``
+        """
+        if isinstance(terms, basestring):
+            terms = [terms]
+
+        return_data = PACKAGE_MAPPING
+
+        for term in terms:
+            return_list = list()
+            try:
+                dfp = DependencyFileProcessor(
+                    local_path=_abs_path(str(term))
+                )
+                return_list.extend(dfp.pip['py_package'])
+                return_list.extend(dfp.pip['git_package'])
+            except Exception as exp:
+                raise AnsibleError(
+                    'lookup_plugin.py_pkgs(%s) returned "%s" error "%s"' % (
+                        term,
+                        str(exp),
+                        traceback.format_exc()
+                    )
+                )
+
+            for item in return_list:
+                map_base_and_remote_packages(item, return_data)
+            else:
+                parse_remote_package_parts(return_data)
+        else:
+            map_role_packages(return_data)
+            map_base_package_details(return_data)
+            # Sort everything within the returned data
+            for key, value in return_data.items():
+                if isinstance(value, (list, set)):
+                    return_data[key] = sorted(value)
+            return_data['role_requirement_files'] = ROLE_REQUIREMENTS
+            return_data['role_requirements'] = ROLE_BREAKOUT_REQUIREMENTS
+            return_data['role_distro_packages'] = ROLE_DISTRO_BREAKOUT_PACKAGES
+            return [return_data]
+
+    def run_v1(self, terms, inject=None, **kwargs):
         """Run the main application.
 
         :type terms: ``str``
@@ -464,16 +752,16 @@ class LookupModule(object):
         :type kwargs: ``dict``
         :returns: ``list``
         """
-        terms = utils.listify_lookup_plugin_terms(terms, self.basedir, inject)
+        terms = utils.listify_lookup_plugin_terms(
+            terms,
+            self.ansible_v1_basedir,
+            inject
+        )
         if isinstance(terms, basestring):
             terms = [terms]
 
-        return_data = {
-            'packages': set(),
-            'remote_packages': set(),
-            'remote_package_parts': list(),
-            'role_packages': dict()
-        }
+        return_data = PACKAGE_MAPPING
+
         for term in terms:
             return_list = list()
             try:
@@ -492,92 +780,23 @@ class LookupModule(object):
                 )
 
             for item in return_list:
-                if item.startswith(('http:', 'https:', 'git+')):
-                    if '@' not in item:
-                        return_data['packages'].add(item)
-                    else:
-                        git_parts = git_pip_link_parse(item)
-                        item_name = git_parts[-1]
-                        if not item_name:
-                            item_name = git_pip_link_parse(item)[0]
-
-                        for rpkg in list(return_data['remote_packages']):
-                            rpkg_name = git_pip_link_parse(rpkg)[-1]
-                            if not rpkg_name:
-                                rpkg_name = git_pip_link_parse(item)[0]
-
-                            if rpkg_name == item_name:
-                                return_data['remote_packages'].remove(rpkg)
-                                return_data['remote_packages'].add(item)
-                                break
-                        else:
-                            return_data['remote_packages'].add(item)
-                else:
-                    return_data['packages'].add(item)
+                map_base_and_remote_packages(item, return_data)
             else:
-                keys = [
-                    'name',
-                    'version',
-                    'fragment',
-                    'url',
-                    'original',
-                    'egg_name'
-                ]
-                remote_pkg_parts = [
-                    dict(
-                        zip(
-                            keys, git_pip_link_parse(i)
-                        )
-                    ) for i in return_data['remote_packages']
-                ]
-                return_data['remote_package_parts'].extend(remote_pkg_parts)
-                return_data['remote_package_parts'] = list(
-                    dict(
-                        (i['name'], i)
-                        for i in return_data['remote_package_parts']
-                    ).values()
-                )
+                parse_remote_package_parts(return_data)
         else:
-            for k, v in ROLE_PACKAGES.items():
-                role_pkgs = return_data['role_packages'][k] = list()
-                for pkg_list in v.values():
-                    role_pkgs.extend(pkg_list)
-                else:
-                    return_data['role_packages'][k] = sorted(set(role_pkgs))
-
-            check_pkgs = dict()
-            base_packages = sorted(list(return_data['packages']))
-            for pkg in base_packages:
-                name, versions, markers = _pip_requirement_split(pkg)
-                if versions and markers:
-                    versions = '%s;%s' % (versions, markers)
-                elif not versions and markers:
-                    versions = ';%s' % markers
-
-                if name in check_pkgs:
-                    if versions and not check_pkgs[name]:
-                        check_pkgs[name] = versions
-                else:
-                    check_pkgs[name] = versions
-            else:
-                return_pkgs = list()
-                for k, v in check_pkgs.items():
-                    if v:
-                        return_pkgs.append('%s%s' % (k, v))
-                    else:
-                        return_pkgs.append(k)
-                return_data['packages'] = set(return_pkgs)
-
+            map_role_packages(return_data)
+            map_base_package_details(return_data)
             # Sort everything within the returned data
             for key, value in return_data.items():
                 if isinstance(value, (list, set)):
                     return_data[key] = sorted(value)
             return_data['role_requirement_files'] = ROLE_REQUIREMENTS
+            return_data['role_requirements'] = ROLE_BREAKOUT_REQUIREMENTS
+            return_data['role_distro_packages'] = ROLE_DISTRO_BREAKOUT_PACKAGES
             return [return_data]
-
 
 # Used for testing and debuging usage: `python plugins/lookups/py_pkgs.py ../`
 if __name__ == '__main__':
     import sys
     import json
-    print(json.dumps(LookupModule().run(terms=sys.argv[1:]), indent=4))
+    print(json.dumps(LookupModule().run(terms=sys.argv[1:]), indent=4, sort_keys=True))

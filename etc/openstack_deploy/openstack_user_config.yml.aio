@@ -71,16 +71,11 @@ global_overrides:
 shared-infra_hosts:
   aio1:
     # Rabbitmq, and galera are set to multiples to test clustering.
-    affinity:
-      galera_container: 3
-      rabbit_mq_container: 3
     ip: 172.29.236.100
 
 os-infra_hosts:
   aio1:
     # Horizon is set to multiple to test clustering. This test only requires x2.
-    affinity:
-      horizon_container: 2
     ip: 172.29.236.100
 
 storage-infra_hosts:
@@ -90,15 +85,11 @@ storage-infra_hosts:
 repo-infra_hosts:
   aio1:
     # Repo is set to multiple to test clustering. This test only requires x2.
-    affinity:
-      repo_container: 2
     ip: 172.29.236.100
 
 identity_hosts:
   aio1:
     # Keystone is set to multiple to test clustering. This test only requires x2.
-    affinity:
-      keystone_container: 2
     ip: 172.29.236.100
 
 compute_hosts:
